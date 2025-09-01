@@ -5,6 +5,7 @@ from typing import List, Dict
 from fastapi import Query
 import httpx
 from datetime import datetime, timedelta
+from fastapi import HTTPException
 
 app = FastAPI(title="Sentiment v1 — News+Reddit")
 
@@ -51,27 +52,51 @@ async def fetch_news(ticker: str, window_hours: int, limit: int):
         return data.get("articles", [])
 
 @app.get("/analyze")
-def analyze(ticker: str = Query(..., min_length=1, max_length=10),
-            windowHours: int = Query(settings.WINDOW_HOURS, ge=1, le=72),
-            limit: int = Query(10, ge=3, le=30)) -> Dict:
-    items = [
-        {
-            "id": "news-0",
+async def analyze(
+    ticker: str = Query(..., min_length=1, max_length=10),
+    windowHours: int = Query(settings.WINDOW_HOURS, ge=1, le=72),
+    limit: int = Query(10, ge=3, le=30)
+) -> Dict:
+    try:
+        articles = await fetch_news(ticker, windowHours, limit)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"NewsAPI error: {e.response.text[:200]}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    items = []
+    for i, a in enumerate(articles[:limit]):
+        title = a.get("title") or ""
+        url = a.get("url") or ""
+        domain = (url.split("/")[2] if "//" in url else "").replace("www.", "")
+        published_at = a.get("publishedAt") or ""
+
+        # temporary heuristic score; we'll swap to LLM next
+        lower = title.lower()
+        score = 0.0
+        if any(w in lower for w in ["beat", "record", "upgrade", "surge", "growth"]):
+            score = 0.6
+        if any(w in lower for w in ["miss", "downgrade", "lawsuit", "drop", "delay"]):
+            score = -0.6
+
+        items.append({
+            "id": f"news-{i}",
             "source": "news",
-            "domain": "example.com",
-            "title": f"{ticker} beats earnings expectations",
-            "url": "https://example.com/a",
-            "publishedAt": "2025-08-31T00:00:00Z",
-            "score": 0.6,
-            "rationale": "Placeholder"
-        }
-    ]
-    overall = round(sum(i["score"] for i in items)/len(items), 2)
+            "domain": domain or a.get("source", {}).get("name", ""),
+            "title": title,
+            "url": url,
+            "publishedAt": published_at,
+            "score": round(score, 2),
+            "rationale": "Keyword placeholder; LLM next"
+        })
+
+    overall = round(sum(i["score"] for i in items)/len(items), 2) if items else 0.0
+
     return {
         "ticker": ticker.upper(),
         "windowHours": windowHours,
         "overall": overall,
-        "confidence": 0.8,
-        "reasons": ["Stub data — will replace with NewsAPI + LLM"],
+        "confidence": 0.8,  # placeholder
+        "reasons": ["NewsAPI integrated; scoring is temporary"],
         "items": items
     }
