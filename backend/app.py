@@ -4,7 +4,7 @@ from config import settings
 from typing import List, Dict
 from fastapi import Query
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 import asyncio, json
 from fastapi import HTTPException
@@ -51,7 +51,7 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
     Returns a list shaped like NewsAPI articles: title, description, url, source{name}, publishedAt.
     """
     token = await reddit_token()
-    to_dt = datetime.utcnow()
+    to_dt = datetime.now(timezone.utc)
     from_dt = to_dt - timedelta(hours=window_hours)
 
     headers = {
@@ -86,7 +86,7 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
         created_utc = d.get("created_utc")
         if not created_utc:
             continue
-        published = datetime.utcfromtimestamp(created_utc)
+        published = datetime.fromtimestamp(created_utc, tz=timezone.utc)
         if published < from_dt:
             continue
 
@@ -97,7 +97,7 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
 
         items.append({
             "title": title,
-            "description": (d.get("selftext") or "")[:400],    
+            "description": (body)[:400],
             "url": url,
             "source": {"name": subreddit},
             "publishedAt": published.replace(microsecond=0).isoformat() + "Z",
@@ -108,6 +108,7 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
 
 SYSTEM_PROMPT = ("""
     You are a cautious but decisive financial news sentiment rater. 
+    Use the web_search Tool to go on relevent sites to gain more context and information.
 
     Output ONLY valid JSON in the format:
     {
@@ -136,11 +137,28 @@ async def llm_score(title: str, text: str, source: str, ticker: str, published_a
     Returns (score: float in [-1,1], rationale: str). Never returns None.
     """
     if not settings.OPENAI_API_KEY:
-        return 0.0, "No LLM key; neutral"
+        return 0.0, "No LLM key; neutral"  
 
     def _call():
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5",
+            tools=[
+                {
+                "type": "web_search",
+                "filters": {
+                "allowed_domains": [
+                    "https://www.reddit.com/r/investing/",
+                    "https://www.reddit.com/r/StockMarket/",
+                    "https://www.reddit.com/r/stocks/",
+                    "https://www.reddit.com/r/finance/",
+                    "https://finance.yahoo.com/",
+                    "https://www.wsj.com/",
+                    "https://www.cnbc.com/2025/08/28/stock-market-today-live-updates-.html",
+                    "https://www.ainvest.com/",
+                    "https://www.marketwatch.com/",
+                    "https://www.liberatedstocktrader.com/"]}}],
+            reasoning={"effort": "high"},
+            include=["web_search_call.action.sources"],
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
