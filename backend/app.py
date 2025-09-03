@@ -15,7 +15,18 @@ def log_err(prefix: str, e: Exception):
     traceback.print_exc()
 
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+app = FastAPI(title="Sentiment v1 — News+Reddit")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"]
+)
+
+@app.get("/health") 
+def health():
+    return {"ok": True, "window_hours": settings.WINDOW_HOURS}
+
 
 # --- Reddit OAuth + fetch ---------------------------------
 REDDIT_AUTH_URL = "https://www.reddit.com/api/v1/access_token"
@@ -51,7 +62,7 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
     Returns a list shaped like NewsAPI articles: title, description, url, source{name}, publishedAt.
     """
     token = await reddit_token()
-    to_dt = datetime.now(timezone.utc)
+    to_dt = datetime.now(timezone.utc).replace(microsecond=0)
     from_dt = to_dt - timedelta(hours=window_hours)
 
     headers = {
@@ -108,7 +119,6 @@ async def fetch_reddit(ticker: str, window_hours: int, limit: int):
 
 SYSTEM_PROMPT = ("""
     You are a cautious but decisive financial news sentiment rater. 
-    Use the web_search Tool to go on relevent sites to gain more context and information.
 
     Output ONLY valid JSON in the format:
     {
@@ -132,6 +142,8 @@ SYSTEM_PROMPT = ("""
     """
     )
 
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
 async def llm_score(title: str, text: str, source: str, ticker: str, published_at: str):
     """
     Returns (score: float in [-1,1], rationale: str). Never returns None.
@@ -142,23 +154,6 @@ async def llm_score(title: str, text: str, source: str, ticker: str, published_a
     def _call():
         resp = client.chat.completions.create(
             model="gpt-5",
-            tools=[
-                {
-                "type": "web_search",
-                "filters": {
-                "allowed_domains": [
-                    "https://www.reddit.com/r/investing/",
-                    "https://www.reddit.com/r/StockMarket/",
-                    "https://www.reddit.com/r/stocks/",
-                    "https://www.reddit.com/r/finance/",
-                    "https://finance.yahoo.com/",
-                    "https://www.wsj.com/",
-                    "https://www.cnbc.com/2025/08/28/stock-market-today-live-updates-.html",
-                    "https://www.ainvest.com/",
-                    "https://www.marketwatch.com/",
-                    "https://www.liberatedstocktrader.com/"]}}],
-            reasoning={"effort": "high"},
-            include=["web_search_call.action.sources"],
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -171,7 +166,7 @@ async def llm_score(title: str, text: str, source: str, ticker: str, published_a
                     f"Date: {published_at}"
                 },
             ],
-            temperature=0.3,
+            # temperature=0.3
         )
         raw = resp.choices[0].message.content or "{}"
         try:
@@ -184,29 +179,18 @@ async def llm_score(title: str, text: str, source: str, ticker: str, published_a
         return s, r
 
     try:
-        return await asyncio.to_thread(_call)
+        result = await asyncio.to_thread(_call)
+        print("[DEBUG] LLM result:", result)
+        return result
     except Exception as e:
+        import traceback
+        traceback.print_exc()   # full stack trace in console
+        print("[ERROR] LLM call failed:", repr(e))
         return 0.0, f"LLM error → neutral ({type(e).__name__})"
 
 
-
-app = FastAPI(title="Sentiment v1 — News+Reddit")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"]
-)
-
-@app.get("/health")
-def health():
-    return {"ok": True, "window_hours": settings.WINDOW_HOURS}
-
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
 
-
-def iso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat() + "Z"
 
 async def fetch_news(ticker: str, window_hours: int, limit: int):
     if not settings.NEWSAPI_KEY:
@@ -215,33 +199,28 @@ async def fetch_news(ticker: str, window_hours: int, limit: int):
             "title": f"{ticker} beats earnings expectations",
             "url": "https://example.com/a",
             "source": {"name": "Example"},
-            "publishedAt": datetime.utcnow().isoformat() + "Z",
+            "publishedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         }]
-
-    to_dt = datetime.utcnow()
-    from_dt = to_dt - timedelta(hours=window_hours)
 
     async def _newsapi(params):
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(NEWSAPI_URL, params=params)
             r.raise_for_status()
             return r.json().get("articles", [])
-
-    def _iso(dt):  # local helper to avoid confusion
-        return dt.replace(microsecond=0).isoformat() + "Z"
-
-    to_dt = datetime.utcnow()
+    
+    to_dt = datetime.now(timezone.utc).replace(microsecond=0)
     from_dt = to_dt - timedelta(hours=window_hours)
 
-    name = {"AAPL":"Apple","MSFT":"Microsoft","NVDA":"Nvidia","AMZN":"Amazon","META":"Meta","GOOGL":"Google"}.get(ticker.upper(), "")
-    title_filter = f"\"{ticker}\"" + (f" OR \"{name}\"" if name else "")
+    def _iso(dt: datetime) -> str:
+        return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    
 
-    name = {"AAPL":"Apple","MSFT":"Microsoft","NVDA":"Nvidia","AMZN":"Amazon","META":"Meta","GOOGL":"Google"}.get(ticker.upper(), "")
-    title_filter = f"\"{ticker}\"" + (f" OR \"{name}\"" if name else "")
+    # name = {"AAPL":"Apple","MSFT":"Microsoft","NVDA":"Nvidia","AMZN":"Amazon","META":"Meta","GOOGL":"Google"}.get(ticker.upper(), "")
+    title_filter = f"\"{ticker}\"" 
 
     # TIER 1 — title must contain ticker OR name; search title+desc
     params1 = {
-        "q": f"{ticker} OR {name}",
+        "q": f"{ticker}",
         "qInTitle": title_filter,
         "searchIn": "title,description",
         "from": _iso(from_dt), "to": _iso(to_dt),
@@ -253,7 +232,7 @@ async def fetch_news(ticker: str, window_hours: int, limit: int):
 
     # TIER 2 — no qInTitle but add finance keywords
     params2 = {
-        "q": f"({ticker} OR {name}) AND (earnings OR results OR guidance OR revenue OR upgrade OR downgrade OR stock OR shares)",
+        "q": f"({ticker}) AND (earnings OR results OR guidance OR revenue OR upgrade OR downgrade OR stock OR shares)",
         "searchIn": "title,description",
         "from": _iso(from_dt), "to": _iso(to_dt),
         "language": "en", "pageSize": min(limit, 50),
@@ -273,10 +252,10 @@ async def fetch_news(ticker: str, window_hours: int, limit: int):
 
 @app.get("/analyze")
 async def analyze(
-    ticker: str = Query(..., min_length=1, max_length=10),
+    ticker: str = Query(..., min_length=1, max_length=50),
     windowHours: int = Query(settings.WINDOW_HOURS, ge=1, le=72),
     limit: int = Query(10, ge=1, le=50)  # allow 1..50
-) -> Dict:
+    ) -> Dict:
 
     try:
         # Get News first
@@ -292,21 +271,12 @@ async def analyze(
 
         print(f"[DEBUG] news={len(news)} reddit={len(reddit)} ticker={ticker}")  # <— add this
 
-        combined = news + reddit
-        combined.sort(key=lambda a: a.get("publishedAt",""), reverse=True)
-        articles = combined[:limit]
-        def is_reddit(a): 
-            u = a.get("url","")
-            return "reddit.com" in u
-
-        articles.sort(key=lambda a: (is_reddit(a), a.get("publishedAt","")), reverse=True)
-        # now first items are news; reddit follows
-
-
         # combine then keep the newest first
         combined = news + reddit
         combined.sort(key=lambda a: a.get("publishedAt",""), reverse=True)
         articles = combined[:limit]
+
+
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"NewsAPI error: {e.response.text[:200]}")
     except Exception as e:
@@ -331,22 +301,6 @@ async def analyze(
                 published_at=published_at
             )
 
-
-        if i < MAX_LLM_ITEMS:
-            async with sem:
-                s, rationale = await llm_score(
-                    title=title,
-                    text=snippet,                              
-                    source=domain or a.get("source", {}).get("name", ""),
-                    ticker=ticker,
-                    published_at=published_at
-                )
-        else:
-            lower = (title + " " + snippet).lower()
-            s = 0.0
-            if any(w in lower for w in ["beat","raise","upgrade","record","surge","strong","guidance"]): s = 0.3
-            if any(w in lower for w in ["miss","cut","downgrade","lawsuit","drop","weak","probe","investigation"]): s = -0.3
-            rationale = "Heuristic fallback"
 
         return {
             "id": f"news-{i}",
