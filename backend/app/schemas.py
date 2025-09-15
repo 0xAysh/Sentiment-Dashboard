@@ -1,27 +1,29 @@
+# app/schemas.py
 from datetime import datetime
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, Dict, Any
 
-class SentimentItem(BaseModel):
-    id: str
+class NewsItem(BaseModel):
+    id: str                                  # required string
     source: str
     title: str
     url: str
     published_at: datetime
-    text: str
-    label: str
+    text: str = ""                            # fine to default to empty
+    label: Literal["positive", "neutral", "negative"]
     prob_positive: float
     prob_neutral: float
     prob_negative: float
     score: float
     weight: float
     weighted_score: float
-    rationale: Optional[str] = None
+    rationale: str = ""                       # <-- non-optional, always a string
+    raw: Optional[Dict[str, Any]] = None
 
 class SentimentResponse(BaseModel):
     ticker: str
-    as_of: datetime
+    as_of: str
     lookback_days: int
     overall_score: float
     n_items: int
-    items: List[SentimentItem]
+    items: list[NewsItem]
