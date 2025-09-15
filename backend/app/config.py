@@ -50,8 +50,24 @@ SOURCE_BASE_WEIGHTS: Dict[str, float] = {
     "marketwatch.com": 0.85,
     "yahoo.com": 0.80,
     "investopedia.com": 0.80,
-    "reddit.com": 0.65,
+    "finance.yahoo.com": 0.85,
+    "reuters.com": 0.95,
+    "bloomberg.com": 0.95,
+    "wsj.com": 0.9,
+    "ft.com": 0.9,
+    "cnbc.com": 0.85,
+    "marketwatch.com": 0.8,
+    "benzinga.com": 0.75,
+    "seekingalpha.com": 0.75,
+    "fool.com": 0.7,
+    "barrons.com": 0.85,
+    "businessinsider.com": 0.75,
+    "msn.com": 0.6,
+    "marketbeat.com": 0.6,
+    "simplywall.st": 0.7,
+    "coincentral.com": 0.6,
 }
+
 
 # HTTP client headers
 USER_AGENT = (

@@ -1,63 +1,53 @@
-"""
-File: app/services/rationales.py
-Optional: generate LLM rationales for each news item.
-Requires OPENAI_API_KEY in environment.
-"""
-
-from __future__ import annotations
-
+# services/rationales.py
+import os, logging
 from typing import List, Optional
+from openai import OpenAI
 
-from app.models import NewsItem
-from app.config import OPENAI_API_KEY
+logger = logging.getLogger(__name__)
 
+MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+APIKEY = os.getenv("OPENAI_API_KEY")
 
-async def chatgpt_rationales(items: List[NewsItem]) -> List[Optional[str]]:
-    """Return 2–3 sentence rationale per item, or None if disabled/error.
+client = OpenAI(api_key=APIKEY) if APIKEY else None
 
-    This runs sequentially to keep things simple. You can parallelize with
-    care about rate limits. Uses OpenAI Responses API (fallback to Chat Completions).
-    """
-    if not OPENAI_API_KEY:
-        return [None for _ in items]
+SYSTEM = (
+    "You are a financial news analyst. For each item, write a concise 1–2 sentence "
+    "rationale explaining why the article is positive/negative/neutral for the ticker. "
+    "No fluff, no emojis."
+)
 
-    try:
-        from openai import OpenAI
+def _prompt(item) -> str:
+    # Keep it short; the model just needs enough context
+    body = (item.text or "")[:900]
+    return (
+        f"Title: {item.title}\n"
+        f"Source: {item.source}\n"
+        f"Excerpt: {body}\n\n"
+        f"Label: {item.label}\n"
+        "Write a 1–2 sentence rationale."
+    )
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+async def chatgpt_rationales(items: List["schemas.NewsItem"]) -> List[Optional[str]]:
+    if not client:
+        logger.warning("Rationales disabled: no OPENAI_API_KEY in env.")
+        return [None] * len(items)
 
-        outs: List[Optional[str]] = []
-        for it in items:
-            prompt = (
-                "You are a finance analyst. Given the news headline, snippet, date, "
-                "and a model's sentiment probabilities, write a 2-3 sentence rationale "
-                "explaining why the sentiment is positive, neutral, or negative for the stock. "
-                "Avoid price targets or investment advice.\n\n"
-                f"Title: {it.title}\n"
-                f"Snippet: {it.text}\n"
-                f"Published (UTC): {it.published_at.isoformat()}\n"
-                f"Model probs — positive: {it.prob_positive:.3f}, neutral: {it.prob_neutral:.3f}, negative: {it.prob_negative:.3f}\n"
-                f"Model score [-1..1]: {it.score:.3f}\n"
+    outs: List[Optional[str]] = []
+    for it in items:
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL,
+                temperature=0.2,
+                max_tokens=120,
+                messages=[
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user",   "content": _prompt(it)},
+                ],
             )
-            try:
-                resp = client.responses.create(
-                    model="gpt-4o-mini",
-                    input=[{"role": "user", "content": prompt}],
-                )
-                text = resp.output_text  # type: ignore[attr-defined]
-            except Exception:
-                chat = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=160,
-                )
-                text = chat.choices[0].message.content  # type: ignore
-
-            outs.append((text or "").strip())
-
-        return outs
-
-    except Exception:
-        # Fail open (no rationales) if OpenAI is unavailable
-        return [None for _ in items]
+            text = (resp.choices[0].message.content or "").strip()
+            outs.append(text or None)
+        except Exception as e:
+            logger.exception("Rationale error for %s (%s): %s", it.id, it.source, e)
+            outs.append(None)
+    logger.info("Rationales generated: %d/%d non-null", sum(1 for x in outs if x), len(outs))
+    return outs

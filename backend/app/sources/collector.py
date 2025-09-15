@@ -1,64 +1,55 @@
-"""
-File: app/sources/collector.py
-Aggregates news from individual fetchers (Google News, Reddit, etc.).
-"""
-
+# app/sources/collector.py
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Iterable
 
 from app.models import NewsItem
-from app.config import MAX_ITEMS
+from app.sources.google_news import GoogleNewsFetcher
+from app.sources.yfinance import YahooFinanceFetcher
+from app.config import MAX_ITEMS, SOURCE_BASE_WEIGHTS, DEFAULT_SOURCE_WEIGHT
 
-# Import fetchers (to be created next)
-from .google_news import GoogleNewsFetcher
-from .reddit import RedditFetcher
-
-
-
-def _within_lookback(dt: datetime, days: int) -> bool:
-    return dt >= datetime.now(timezone.utc) - timedelta(days=days)
-
-
-def _dedupe(items: List[NewsItem]) -> List[NewsItem]:
-    seen: set[str] = set()
+def _dedupe(items: Iterable[NewsItem]) -> List[NewsItem]:
+    seen_url: set[str] = set()
+    seen_title: set[str] = set()
     out: List[NewsItem] = []
     for it in items:
-        key = it.url or it.title.lower()
-        if key in seen:
+        url_key = (it.url or "").split("?")[0]
+        if url_key and url_key in seen_url:
             continue
-        seen.add(key)
+        t = it.title or ""
+        if t and t in seen_title:
+            continue
+        seen_url.add(url_key)
+        seen_title.add(t)
         out.append(it)
     return out
 
+def _is_trusted(domain: str) -> bool:
+    # Accept if credibility weight >= 0.6
+    w = SOURCE_BASE_WEIGHTS.get(domain, DEFAULT_SOURCE_WEIGHT)
+    return w >= 0.6
 
-# Register available fetchers here
-FETCHERS = [GoogleNewsFetcher(), RedditFetcher()]
-
-
-async def collect_news(ticker: str, lookback_days: int) -> List[NewsItem]:
-    """Run all fetchers concurrently, clean, filter, sort, and cap."""
-    results = await asyncio.gather(
-        *[f.fetch(ticker, lookback_days) for f in FETCHERS],
-        return_exceptions=True,
+async def collect_news(ticker: str, lookback_days: int, limit: int | None = None) -> List[NewsItem]:
+    # Run both fetchers concurrently
+    gfetch = GoogleNewsFetcher()
+    yfetch = YahooFinanceFetcher()
+    g_items, y_items = await asyncio.gather(
+        gfetch.fetch(ticker, lookback_days),
+        yfetch.fetch(ticker, lookback_days),
     )
 
-    all_items: List[NewsItem] = []
-    for res in results:
-        if isinstance(res, Exception):
-            continue
-        all_items.extend(res)
+    items: List[NewsItem] = [*g_items, *y_items]
 
-    # Filter by window
-    all_items = [it for it in all_items if _within_lookback(it.published_at, lookback_days)]
+    # Filter to trusted domains
+    items = [it for it in items if _is_trusted(it.source)]
 
-    # Dedupe by URL/title
-    all_items = _dedupe(all_items)
+    # Newest first
+    items.sort(key=lambda it: it.published_at, reverse=True)
 
-    # Order newest-first and cap
-    all_items.sort(key=lambda x: x.published_at, reverse=True)
-    cap = min(MAX_ITEMS, len(all_items))
-    return all_items[:MAX_ITEMS]
+    # Dedupe
+    items = _dedupe(items)
 
+    # Cap
+    cap = min(limit or MAX_ITEMS, len(items))
+    return items[:cap]

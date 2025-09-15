@@ -35,7 +35,7 @@ async def health():
 async def sentiment(
     ticker: str = Query(..., min_length=1, max_length=10, description="Stock ticker, e.g., TSLA"),
     lookback_days: int = Query(DEFAULT_LOOKBACK_DAYS, ge=1, le=14),
-    include_rationales: bool = Query(False, description="If true, calls ChatGPT to explain each news."),
+    include_rationales: bool = Query(True, description="If False, doesn't calls ChatGPT to explain each news."),
     limit: int = Query(10, ge=1, le=50)
 ):
     ticker = ticker.upper().strip()
@@ -52,4 +52,4 @@ async def sentiment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Run locally with `python -m uvicorn app.main:app --reload`
+# Run locally with `python -m uvicorn app.main:app --reload --reload-dir app`
