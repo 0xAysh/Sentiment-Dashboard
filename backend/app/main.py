@@ -6,7 +6,7 @@ Main FastAPI application and routing layer.
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import schemas
+from app.schemas import SentimentResponse
 from app.sources.collector import collect_news
 from app.core.sentiment import analyze_items
 from app.services.rationales import chatgpt_rationales
@@ -31,16 +31,17 @@ async def health():
     return {"status": "ok", "as_of": now_utc().isoformat()}
 
 
-@app.get("/sentiment", response_model=schemas.SentimentResponse)
+@app.get("/sentiment", response_model= SentimentResponse)
 async def sentiment(
     ticker: str = Query(..., min_length=1, max_length=10, description="Stock ticker, e.g., TSLA"),
     lookback_days: int = Query(DEFAULT_LOOKBACK_DAYS, ge=1, le=14),
     include_rationales: bool = Query(False, description="If true, calls ChatGPT to explain each news."),
+    limit: int = Query(10, ge=1, le=50)
 ):
     ticker = ticker.upper().strip()
     try:
-        items = await collect_news(ticker, lookback_days)
-        items = await analyze_items(items)
+        items = await collect_news(ticker, lookback_days, limit)
+        items = analyze_items(items)
         rationals = None
         if include_rationales and items:
             rationals = await chatgpt_rationales(items)
