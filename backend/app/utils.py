@@ -57,34 +57,39 @@ def clamp01(x: float) -> float:
 def to_response(
     ticker: str,
     items: List[NewsItem],
-    rationales: Optional[List[Optional[str]]] = None,
+    rationales: Optional[List[str]] = None,
     lookback_days: int = 5,
 ) -> schemas.SentimentResponse:
-    """Turn analyzed NewsItems into a SentimentResponse.
+    """Turn analyzed NewsItems into a SentimentResponse with non-optional rationales."""
 
-    Assumes each NewsItem has: label, prob_* fields, score, weight, weighted_score set
-    by the analysis stage. Missing values are treated as 0/neutral.
-    """
-    weights = [it.weight for it in items if it.weight is not None]
-    wscores = [it.weighted_score for it in items if it.weighted_score is not None]
-    if wscores and weights:
-        overall = sum(wscores) / (sum(weights) or 1.0)
+    # overall score (weighted average of weighted_score)
+    weights = [float(it.weight or 0.0) for it in items]
+    wscores = [float(it.weighted_score or 0.0) for it in items]
+    overall = (sum(wscores) / (sum(weights) or 1.0)) if (wscores and weights) else 0.0
+
+    # make sure we have a rationale string per item
+    n = len(items)
+    if not rationales:
+        safe_rationales = [""] * n
     else:
-        overall = 0.0
+        safe_rationales = [str(x or "") for x in rationales]
+        if len(safe_rationales) < n:
+            safe_rationales += [""] * (n - len(safe_rationales))
+        elif len(safe_rationales) > n:
+            safe_rationales = safe_rationales[:n]
 
-    resp_items: List[schemas.SentimentItem] = []
+    # rebuild items as *schemas.NewsItem* (fresh instances) so Pydantic
+    # validation never trips over hot-reload class identity
+    resp_items: List[schemas.NewsItem] = []
     for idx, it in enumerate(items):
-        rationale = None
-        if rationales and idx < len(rationales):
-            rationale = rationales[idx] or None
         resp_items.append(
-            schemas.SentimentItem(
+            schemas.NewsItem(
                 id=it.id,
                 source=it.source,
                 title=it.title,
                 url=it.url,
                 published_at=it.published_at,
-                text=it.text,
+                text=it.text or "",
                 label=it.label or "neutral",
                 prob_positive=float(it.prob_positive or 0.0),
                 prob_neutral=float(it.prob_neutral or 0.0),
@@ -92,15 +97,16 @@ def to_response(
                 score=float(it.score or 0.0),
                 weight=float(it.weight or 0.0),
                 weighted_score=float(it.weighted_score or 0.0),
-                rationale=rationale,
+                rationale=safe_rationales[idx],          # <<< always a string
+                raw=getattr(it, "raw", None),
             )
         )
 
     return schemas.SentimentResponse(
-        ticker=ticker.upper(),
-        as_of=now_utc(),
+        ticker=ticker,
+        as_of=datetime.now(timezone.utc).isoformat(),  # your schema uses str
         lookback_days=lookback_days,
-        overall_score=round(float(overall), 4),
+        overall_score=round(overall, 4),
         n_items=len(resp_items),
         items=resp_items,
     )

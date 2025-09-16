@@ -17,7 +17,7 @@ class NewsItem(BaseModel):
     score: float
     weight: float
     weighted_score: float
-    rationale: str = ""                       # <-- non-optional, always a string
+    rationale: str = Field(default="")                       # <-- non-optional, always a string
     raw: Optional[Dict[str, Any]] = None
 
 class SentimentResponse(BaseModel):

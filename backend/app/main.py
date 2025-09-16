@@ -13,9 +13,28 @@ from app.core.sentiment import analyze_items
 from app.services.rationales import chatgpt_rationales
 from app.utils import now_utc, to_response
 from app.config import DEFAULT_LOOKBACK_DAYS
+import asyncio, logging, time
+
+
+log = logging.getLogger("uvicorn")
 
 # --- FastAPI app ---
 app = FastAPI(title="Stock News Sentiment API", version="0.1.0")
+
+@app.on_event("startup")
+async def _warm_start():
+    async def _warm():
+        t0 = time.perf_counter()
+        try:
+            from app.core.sentiment import _load_model
+            loop = asyncio.get_running_loop()
+            # run sync _load_model() in a thread so startup doesn't block
+            await loop.run_in_executor(None, _load_model)
+            log.info("FinBERT warm-load done in %.1fs", time.perf_counter() - t0)
+        except Exception as e:
+            log.warning("Warm-load skipped: %s", e)
+    # fire-and-forget, don't block startup
+    asyncio.create_task(_warm())
 
 # Enable CORS for UI consumption
 app.add_middleware(
@@ -75,19 +94,11 @@ async def sentiment(
         items = analyze_items(items)
         rationales: list[str] | None = None
 
+        rationales: list[str] = []
         if include_rationales and items:
-            rationales = await chatgpt_rationales(items, ticker)   # <-- pass ticker
-            # EITHER attach to items here:
-            _attach_rationales(items, rationales)
-            # and then return without passing rationales:
-            return to_response(ticker, items, lookback_days)
-            # OR, if your to_response() does the attaching, keep your current call:
-            # return to_response(ticker, items, rationales, lookback_days)
-
-        if include_rationales and items:
-            rationales = await chatgpt_rationales(items)
-
-        # return to_response(ticker, items, rationales, lookback_days)  # <-- always return
+            rationales = await chatgpt_rationales(items, ticker)  # returns list[str] with fallback
+            
+        return to_response(ticker, items, rationales, lookback_days)
         
 
     except HTTPException:
