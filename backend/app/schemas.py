@@ -1,9 +1,11 @@
 # app/schemas.py
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal, Optional, Dict, Any
 
 class NewsItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str                                  # required string
     source: str
     title: str

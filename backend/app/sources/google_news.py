@@ -1,24 +1,20 @@
-# app/sources/google_news.py
+"""
+Google News fetcher with publisher domain mapping.
+"""
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
 from typing import List, Optional
-from urllib.parse import urlencode   # <-- add
+from urllib.parse import urlencode
 
 import feedparser
-from dateutil import parser as dateparser
 
 from app.models import NewsItem
-# add import
-import hashlib
+from app.sources.common import clean_text, make_news_id, parse_utc_datetime
 
-# helper
-def _make_id(url: str, title: str, published_at: datetime) -> str:
-    key = f"{url}|{title}|{published_at.isoformat()}".encode("utf-8", "ignore")
-    return hashlib.blake2b(key, digest_size=8).hexdigest()
 
-_PUBLISHER_DOMAIN_MAP = {
+# Publisher name to domain mapping
+PUBLISHER_DOMAIN_MAP = {
     "Reuters": "reuters.com",
     "Bloomberg": "bloomberg.com",
     "Wall Street Journal": "wsj.com",
@@ -39,66 +35,132 @@ _PUBLISHER_DOMAIN_MAP = {
     "Yahoo Finance": "finance.yahoo.com",
 }
 
-def _to_utc(dt: Optional[str]) -> datetime:
-    if not dt:
-        return datetime.now(timezone.utc)
-    d = dateparser.parse(dt)
-    return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-def _publisher_from_entry(entry) -> Optional[str]:
-    # Prefer <source><title>
-    src = entry.get("source")
-    if isinstance(src, dict):
-        t = src.get("title")
-        if t:
-            return t.strip()
-    # Fallback: last <font> tag in summary
+def extract_publisher_from_entry(entry) -> Optional[str]:
+    """
+    Extract publisher name from RSS entry.
+    
+    Args:
+        entry: RSS feed entry
+        
+    Returns:
+        Publisher name or None if not found
+    """
+    # Try to get publisher from source title
+    source = entry.get("source")
+    if isinstance(source, dict):
+        title = source.get("title")
+        if title:
+            return clean_text(title)
+    
+    # Fallback: extract from summary font tags
     summary = entry.get("summary", "") or ""
-    m = re.findall(r"<font[^>]*>([^<]+)</font>", summary, flags=re.I)
-    return m[-1].strip() if m else None
+    font_matches = re.findall(r"<font[^>]*>([^<]+)</font>", summary, flags=re.IGNORECASE)
+    return clean_text(font_matches[-1]) if font_matches else None
 
-def _domain_from_publisher(name: Optional[str]) -> str:
-    if not name:
+
+def map_publisher_to_domain(publisher_name: Optional[str]) -> str:
+    """
+    Map publisher name to domain.
+    
+    Args:
+        publisher_name: Publisher name from RSS entry
+        
+    Returns:
+        Domain name
+    """
+    if not publisher_name:
         return "google.com"
-    name = name.strip()
-    if name in _PUBLISHER_DOMAIN_MAP:
-        return _PUBLISHER_DOMAIN_MAP[name]
-    # If looks like a domain, normalize cheaply (no external deps)
-    nm = name.lower().strip()
-    if "." in nm and " " not in nm:
-        if nm.startswith("www."):
-            nm = nm[4:]
-        return nm
+    
+    publisher_name = clean_text(publisher_name)
+    
+    # Check direct mapping
+    if publisher_name in PUBLISHER_DOMAIN_MAP:
+        return PUBLISHER_DOMAIN_MAP[publisher_name]
+    
+    # If it looks like a domain, normalize it
+    normalized = publisher_name.lower().strip()
+    if "." in normalized and " " not in normalized:
+        if normalized.startswith("www."):
+            normalized = normalized[4:]
+        return normalized
+    
     return "google.com"
 
+
 class GoogleNewsFetcher:
-    BASE = "https://news.google.com/rss/search"
+    """Fetches news articles from Google News RSS feeds."""
+    
+    BASE_URL = "https://news.google.com/rss/search"
+    DEFAULT_DOMAIN = "google.com"
 
     async def fetch(self, ticker: str, lookback_days: int) -> List[NewsItem]:
-        params = urlencode({"q": f"{ticker} stock", "hl": "en-US", "gl": "US", "ceid": "US:en"})
-        url = f"{self.BASE}?{params}"     # <-- encoded, no spaces
+        """
+        Fetch news articles for a given ticker.
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'TSLA', 'AAPL')
+            lookback_days: Number of days to look back (not used in RSS)
+            
+        Returns:
+            List of NewsItem objects
+        """
+        params = urlencode({
+            "q": f"{ticker} stock",
+            "hl": "en-US",
+            "gl": "US",
+            "ceid": "US:en"
+        })
+        url = f"{self.BASE_URL}?{params}"
 
-        feed = feedparser.parse(url)
+        try:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            # Log error and return empty list
+            print(f"Error fetching Google News feed for {ticker}: {e}")
+            return []
+
         items: List[NewsItem] = []
 
-        for e in feed.entries:
-            published_at = _to_utc(e.get("published"))
-            title = (e.get("title") or "").strip()
-            link = (e.get("link") or "").strip()
-            summary = (e.get("summary") or "").strip()
+        for entry in feed.entries:
+            try:
+                # Extract and clean data from RSS entry
+                title = clean_text(entry.get("title"))
+                link = clean_text(entry.get("link"))
+                summary = clean_text(entry.get("summary"))
+                published_at = parse_utc_datetime(entry.get("published"))
 
-            publisher = _publisher_from_entry(e)
-            domain = _domain_from_publisher(publisher)
-            nid = _make_id(link, title, published_at)
-            items.append(
-                NewsItem(
-                    id=nid,                       # <-- set string id
+                # Skip if essential data is missing
+                if not title or not link:
+                    continue
+
+                # Extract publisher and map to domain
+                publisher = extract_publisher_from_entry(entry)
+                domain = map_publisher_to_domain(publisher)
+
+                # Generate unique ID
+                news_id = make_news_id(link, title, published_at)
+
+                # Create NewsItem
+                news_item = NewsItem(
+                    id=news_id,
                     source=domain,
                     title=title,
                     url=link,
                     published_at=published_at,
                     text=summary,
-                    raw={"publisher": publisher, "google_rss": True},
+                    raw={
+                        "publisher": publisher,
+                        "google_rss": True,
+                        "ticker": ticker
+                    },
                 )
-            )
+                
+                items.append(news_item)
+                
+            except Exception as e:
+                # Skip malformed entries
+                print(f"Error processing Google News entry: {e}")
+                continue
+
         return items
