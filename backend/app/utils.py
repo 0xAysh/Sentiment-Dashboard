@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
 import tldextract
 from app.models import NewsItem

@@ -7,6 +7,5 @@ __pycache__/
 node_modules/
 
 # Env files
-.env
+
 backend/.env
-frontend/.env
